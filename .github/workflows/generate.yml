@@ -1,0 +1,129 @@
+# This is a workflow that deploys:
+#   - storage account
+#   - static website on storage account
+#   - cdn profile with an endpoint
+#   - enables https with azure managed cert pointing to a custom domain
+
+name: Azure Website
+
+# Controls when the workflow will run
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'App Name'
+        required: true
+      location:
+        description: 'Azure Location'
+        required: true
+        default: 'eastus'
+      sub: 
+        description: 'Azure Subscription'
+        required: true
+        default: 'Visual Studio Enterprise'
+      rg_name:
+        description: 'Azure Resource Group Name'
+        required: true
+      sa_sku:
+        description: 'Storage Account SKU'
+        required: true
+        default: 'Standard_GRS'
+      sa_type:
+        description: 'Storage Account Type'
+        required: true
+        default: 'StorageV2'
+      cdn_type:
+        description: 'Azure CDN Type'
+        required: true
+        default: 'Standard_Microsoft'
+      custom_domain_hostname:
+        description: 'Custom Domain Hostname'
+        required: true
+        default: 'www.example.com'
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'test'
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+    env:
+      app_name: ${{ github.event.inputs.app_name }}
+      location: ${{ github.event.inputs.location }}
+      sub: ${{ github.event.inputs.sub }}
+      rg_name: ${{ github.event.inputs.rg_name }}
+      sa_sku: ${{ github.event.inputs.sa_sku }}
+      sa_type: ${{ github.event.inputs.sa_type }}
+      cdn_type: ${{ github.event.inputs.cdn_type }}
+      custom_domain_hostname: ${{ github.event.inputs.custom_domain_hostname }}
+      environment: ${{ github.event.inputs.environment }}
+      sa_name: 'sa${{ github.event.inputs.app_name }}${{ github.event.inputs.environment }}'
+      sa_web_endpoint: ''
+      creator: ${{ github.actor }}
+      error_page_name: '404.html'
+      index_name: 'index.html'
+      cdn_profile_name: '${{ github.event.inputs.app_name }}cdn${{ github.event.inputs.environment }}'
+      cdn_endpoint_name: '${{ github.event.inputs.app_name }}endpoint${{ github.event.inputs.environment }}'
+      domain_name: '${{ github.event.inputs.app_name }}-domain-${{ github.event.inputs.environment }}'
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+      - name: Azure Login
+        uses: Azure/login@v1
+        env:
+          CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        with:
+          # Paste output of `az ad sp create-for-rbac` as value of secret variable: AZURE_CREDENTIALS
+          creds: ${{ env.CREDENTIALS }}
+      - name: Az Account Set Sub
+        uses: Azure/cli@1.0.4
+        with:
+          # Specify the script here
+          inlineScript: az account set --subscription $sub
+      - name: Az Create Storage Account
+        uses: Azure/cli@1.0.4
+        with:
+          # Specify the script here
+          inlineScript: az storage account create --name $sa_name --resource-group $rg_name --location $location --sku $sa_sku --kind $sa_type --tags "env=$environment" "creator=$creator"
+      - name: Az Create Static Website
+        uses: Azure/cli@1.0.4
+        with:
+          # Specify the script here
+          inlineScript: az storage blob service-properties update --account-name $sa_name --static-website --404-document $error_page_name --index-document $index_name
+      - name: Az Upload Website Folder
+        uses: Azure/cli@1.0.4
+        env:
+          WEB_ROOT_PATH: './src'
+        with:
+          # Specify the script here
+          inlineScript: az storage blob upload-batch --account-name $sa_name -s $WEB_ROOT_PATH -d '$web'
+      - name: Az Create CDN Profile
+        uses: Azure/cli@1.0.4
+        with:
+          # Specify the script here
+          inlineScript: az cdn profile create --resource-group $rg_name --name $cdn_profile_name --sku $cdn_type --tags "env=$environment" "creator=$creator"
+      - name: Az get SA web endpoint
+        uses: Azure/cli@1.0.4
+        with:
+          # Specify the script here
+          inlineScript: az storage account show --name $sa_name --resource-group $rg_name --query "primaryEndpoints.web" | sed 's/https:\/\///' | sed 's/\///' | while read word; do echo "sa_web_endpoint=$word"; done >> $GITHUB_ENV
+      - name: Az Create Endpoint on CDN
+        uses: Azure/cli@1.0.4
+        with:
+          inlineScript: az cdn endpoint create --resource-group $rg_name --name $cdn_endpoint_name --profile-name $cdn_profile_name --origin $sa_web_endpoint --origin-host-header $sa_web_endpoint --enable-compression
+      - name: Az Create Custom Domain
+        uses: Azure/cli@1.0.4
+        with:
+          # Specify the script here
+          inlineScript: az cdn custom-domain create --resource-group $rg_name --endpoint-name $cdn_endpoint_name --profile-name $cdn_profile_name --name $domain_name --hostname $custom_domain_hostname
+      - name: Az Enable HTTPS on Custom Domain
+        uses: Azure/cli@1.0.4
+        with:
+          # Specify the script here
+          inlineScript: az cdn custom-domain enable-https --resource-group $rg_name --endpoint-name $cdn_endpoint_name --profile-name $cdn_profile_name --name $domain_name
